@@ -14,6 +14,8 @@ import time
 import smbus
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
 
+MODE = "joystick" # or "autonomous"
+
 class VL6180XSuperBasicDriver(object):
     SYSRANGE__START = 0x18
     SYSRANGE__INTERMEASUREMENT_PERIOD = 0x1B 
@@ -75,10 +77,6 @@ class ControlThread(object):
         self.motors["b_right"] = {"motor" : self.main_motor_hat.getMotor(3), "target" : 0.0, "scaler" : -1.0}
         self.motors["f_right"] = {"motor" : self.main_motor_hat.getMotor(4), "target" : 0.0, "scaler" : 1.0}
 
-        # Range sensor interface
-        self.vl6180 = VL6180XSuperBasicDriver()
-        self.vl6180.start_ranging(100, True)
-
         # Queue for input events
         self.input_queue = Queue.Queue(1)
         self.thread = Thread(target=self.process)
@@ -133,9 +131,6 @@ class ControlThread(object):
                 
                 self.set_motor(self.motors["f_right"], event["right_y"])
                 self.set_motor(self.motors["b_right"], event["right_y"])
-            
-            range_mm = self.vl6180.read_range_mm()
-            print "Range mm: %d" % range_mm
     
     def start(self):
         self.thread.start()
@@ -166,7 +161,7 @@ class InputThread(object):
         last_time = 0
         interval = 0.1
 
-	# Set an interval to kick the event loop to get latest value of axes
+    # Set an interval to kick the event loop to get latest value of axes
         pygame.time.set_timer(pygame.USEREVENT + 1, int((interval / 2.0) * 1000))
 
         old_buttons = []
@@ -214,6 +209,71 @@ class InputThread(object):
         self.thread.start()
 
 
+class AutonomousModeController(object):
+    def __init__(self, motor_controller, params):
+        # Range sensor interface
+        self.vl6180 = VL6180XSuperBasicDriver()
+        self.vl6180.start_ranging(100, True)
+
+        self.motor_controller = motor_controller
+
+        self.obstacle_thresh_mm = params.get("obstacle_thresh_mm", 150.0)
+        self.forward_speed_percent = params.get("forward_speed_percent", 40.0)
+        self.reverse_speed_percent = params.get("reverse_speed_percent", 80.0)
+        self.rotation_speed_percent = params.get("rotation_speed_percent", 10.0)
+        self.rotation_duration_sec = params.get("rotation_duration_sec", 2.0)
+        self.reverse_duration_sec = params.get("reverse_duration_sec", 1.0)
+        self.start_time = time.time()
+
+        self.state = "judge_obstacle"
+        self.thread = Thread(target=self.process, name="AutonomousModeController")
+        self.running = True
+
+    def process(self):
+        while self.running:
+            if self.state == "judge_obstacle":
+                range_mm = self.vl6180.read_range_mm()
+                if range_mm < self.obstacle_thresh_mm:
+                    # Saw obstacle, move to reverse
+                    self.state = "evade_reverse"
+                    self.start_time = time.time()
+                else:
+                    # Forward if no obstacle
+                    forward_speed = self.forward_speed_percent / 100.0
+                    dispatch_update = {"left_y": forward_speed, "right_y": forward_speed}
+                    self.motor_controller.put(dispatch_update, block=True)
+            elif self.state == "evade_reverse":
+                if (time.time() - self.start_time) >= self.reverse_duration_sec:
+                    # If we have finished backing away, go to rotate
+                    self.state = "evade_rotate"
+                    self.start_time = time.time()
+                else:
+                    # Reverse while evading
+                    reverse_speed = -self.reverse_speed_percent / 100.0
+                    dispatch_update = {"left_y": reverse_speed, "right_y": reverse_speed}
+                    self.motor_controller.put(dispatch_update, block=True)
+            elif self.state == "evade_rotate":
+                # Check for being done
+                if (time.time() - self.start_time) >= self.rotation_duration_sec:
+                    # If we have finished backing away, go to rotate
+                    self.state = "judge_obstacle"
+                    self.start_time = time.time()
+                else:
+                    rotate_speed = self.rotation_speed_percent / 100.0
+                    # FIXME: Always rotating right
+                    dispatch_update = {"left_y": rotate_speed, "right_y": -rotate_speed}
+                    self.motor_controller.put(dispatch_update, block=True)
+            else:
+                print "INVALID STATE: %s" % self.state
+                self.state = "judge_obstacle"
+
+    def start(self):
+        self.thread.start()
+
+    def join(self):
+        self.thread.join()
+
+
 def turnOffMotors():
     global mh
     mh.getMotor(1).run(Adafruit_MotorHAT.RELEASE)
@@ -228,21 +288,28 @@ def main():
     mh = Adafruit_MotorHAT(addr=0x62)
     # recommended for auto-disabling motors on shutdown!
     atexit.register(turnOffMotors)
-    
-    pygame.init()
-    pygame.joystick.init()
-    #pygame.display.set_mode((1,1))
+
+    if MODE == "joystick":
+        pygame.init()
+        pygame.joystick.init()
+        #pygame.display.set_mode((1,1))
     
     print "Initialized"
     control_thread = ControlThread(mh)
-    
-    input_thread = InputThread()
-    input_thread.add_listener(control_thread.get_input_queue())
-    
     control_thread.start()
-    input_thread.start()
-    print "Threads started"
-    
+
+    if MODE == "joystick":
+        input_thread = InputThread()
+        input_thread.add_listener(control_thread.get_input_queue())
+        input_thread.start()
+        print "Threads started"
+    elif MODE == "autonomous":
+        autonomous_controller = AutonomousModeController(control_thread.get_input_queue(), {})
+        autonomous_controller.start()
+
+        print "Threads started"
+        autonomous_controller.join()
+
     return 0
 
 if __name__ == '__main__':
