@@ -9,12 +9,14 @@
 from threading import Thread
 import atexit
 import Queue
+import sys
 import pygame
 import time
 import smbus
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
 
-MODE = "joystick" # or "autonomous"
+#MODE = "joystick"
+MODE = "autonomous"
 
 class VL6180XSuperBasicDriver(object):
     SYSRANGE__START = 0x18
@@ -84,7 +86,7 @@ class ControlThread(object):
     def get_input_queue(self):
         return self.input_queue
         
-    def set_motor(self, motor,target):
+    def set_motor(self, motor, target):
         true_target = target * motor["scaler"]
         
         if motor["target"] == 0.0:
@@ -125,6 +127,10 @@ class ControlThread(object):
 
             if "quit" in event:
                 running = False
+                for motor in self.motors:
+                    motor["motor"].run(Adafruit_MotorHAT.RELEASE)
+                    motor["motor"].setSpeed(0)
+
             elif "left_y" in event:
                 self.set_motor(self.motors["f_left"], event["left_y"])
                 self.set_motor(self.motors["b_left"], event["left_y"])
@@ -229,13 +235,18 @@ class AutonomousModeController(object):
         self.thread = Thread(target=self.process, name="AutonomousModeController")
         self.running = True
 
+    def set_state(self, new_state):
+        print "%s->%s" % (self.state, new_state)
+        self.state = new_state
+
     def process(self):
         while self.running:
             if self.state == "judge_obstacle":
                 range_mm = self.vl6180.read_range_mm()
+                print "judge_obstacle, range=%d" % range_mm
                 if range_mm < self.obstacle_thresh_mm:
                     # Saw obstacle, move to reverse
-                    self.state = "evade_reverse"
+                    self.set_state("evade_reverse")
                     self.start_time = time.time()
                 else:
                     # Forward if no obstacle
@@ -245,7 +256,7 @@ class AutonomousModeController(object):
             elif self.state == "evade_reverse":
                 if (time.time() - self.start_time) >= self.reverse_duration_sec:
                     # If we have finished backing away, go to rotate
-                    self.state = "evade_rotate"
+                    self.set_state("evade_rotate")
                     self.start_time = time.time()
                 else:
                     # Reverse while evading
@@ -256,7 +267,7 @@ class AutonomousModeController(object):
                 # Check for being done
                 if (time.time() - self.start_time) >= self.rotation_duration_sec:
                     # If we have finished backing away, go to rotate
-                    self.state = "judge_obstacle"
+                    self.set_state("judge_obstacle")
                     self.start_time = time.time()
                 else:
                     rotate_speed = self.rotation_speed_percent / 100.0
@@ -272,7 +283,6 @@ class AutonomousModeController(object):
 
     def join(self):
         self.thread.join()
-
 
 def turnOffMotors():
     global mh
@@ -313,9 +323,13 @@ def main():
     return 0
 
 if __name__ == '__main__':
-    print "Sleeping"
-    time.sleep(1)
-    print "Waking"
-    main()
-    print "Done"
+    try:
+        print "Sleeping"
+        time.sleep(1)
+        print "Waking"
+        main()
+        print "Done"
+    except KeyboardInterrupt:
+        turnOffMotors()
+        sys.exit(1)
 
