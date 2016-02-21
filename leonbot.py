@@ -173,7 +173,7 @@ class InputThread(object):
         last_time = 0
         interval = 0.1
 
-    # Set an interval to kick the event loop to get latest value of axes
+        # Set an interval to kick the event loop to get latest value of axes
         pygame.time.set_timer(pygame.USEREVENT + 1, int((interval / 2.0) * 1000))
 
         old_buttons = []
@@ -240,16 +240,20 @@ class AutonomousModeController(object):
         self.start_time = time.time()
         self.servo_start_time = time.time()
 
-
-        self.servo_pwm_freq_hz = params.get("servo_pwm_freq_hz", 30)
+        self.servo_pwm_freq_hz = params.get("servo_pwm_freq_hz", 48)
         self.servo_max_angle_deg = params.get("servo_max_angle_deg", 45.0)
         self.servo_max_angle_us = params.get("servo_max_angle_us", 400)
         self.servo_neutral_us = params.get("servo_neutral_us", 1520)
+        # Correction factor to apply to each duration to match the 
+        # internal oscillator of the PCA9685 on the Servo HAT. The internal
+        # RC clock is supposed to be 25MHz, but it can be off
+        self.servo_clock_k = params.get("servo_clock_k", 1.073446)
         self.servo_controller.setPWMFreq(self.servo_pwm_freq_hz)
 
         self.servo_pos_idx = 0
-        self.servo_pos_deg = [-10.0, 0.0, 10.0]
-        self.servo_interval_sec = 0.5
+        self.servo_pos_deg = [-10.0, 0.0, 10.0, 0.0]
+        #self.servo_pos_deg = [0.0]
+        self.servo_interval_sec = 0.4
 
         self.state = "judge_obstacle"
         self.thread = Thread(target=self.process, name="AutonomousModeController")
@@ -262,8 +266,9 @@ class AutonomousModeController(object):
     def set_servo_pulse(self, channel, angle_deg):
         pulse_len_us = float(1e6) # 1,000,000 us per second at 1Hz
         pulse_len_us /= float(self.servo_pwm_freq_hz) # us per pulse
-        duration_us = self.servo_neutral_us + ((angle_deg / self.servo_max_angle_deg) * self.servo_max_angle_us)
-        duration_counts = (duration_us / servo_pulse_len_us) * 4095
+        duration_us = self.servo_clock_k * (self.servo_neutral_us + ((float(angle_deg) / float(self.servo_max_angle_deg)) * float(self.servo_max_angle_us)))
+        duration_counts = (duration_us / pulse_len_us) * 4095
+        #print "pulse_len_us: %.3f, duration_us=%.3f" % (pulse_len_us, duration_us)
         self.servo_controller.setPWM(channel, 0, int(duration_counts))
 
     def _handle_servo(self):
@@ -288,7 +293,7 @@ class AutonomousModeController(object):
 
             if self.state == "judge_obstacle":
                 range_mm = self.vl6180.read_range_mm()
-                print "judge_obstacle, range=%d" % range_mm
+                #print "judge_obstacle, range=%d" % range_mm
                 if range_mm < 20.0:
                     self.motor_controller.put({"quit"})
                     self.running = False
