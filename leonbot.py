@@ -224,9 +224,9 @@ class AutonomousModeController(object):
         self.motor_controller = motor_controller
 
         self.obstacle_thresh_mm = params.get("obstacle_thresh_mm", 150.0)
-        self.forward_speed_percent = params.get("forward_speed_percent", 40.0)
-        self.reverse_speed_percent = params.get("reverse_speed_percent", 80.0)
-        self.rotation_speed_percent = params.get("rotation_speed_percent", 10.0)
+        self.forward_speed_percent = params.get("forward_speed_percent", 50.0)
+        self.reverse_speed_percent = params.get("reverse_speed_percent", 40.0)
+        self.rotation_speed_percent = params.get("rotation_speed_percent", 60.0)
         self.rotation_duration_sec = params.get("rotation_duration_sec", 2.0)
         self.reverse_duration_sec = params.get("reverse_duration_sec", 1.0)
         self.start_time = time.time()
@@ -244,6 +244,9 @@ class AutonomousModeController(object):
             if self.state == "judge_obstacle":
                 range_mm = self.vl6180.read_range_mm()
                 print "judge_obstacle, range=%d" % range_mm
+                if range_mm < 20.0:
+                    self.motor_controller.put({"quit"})
+                    self.running = False
                 if range_mm < self.obstacle_thresh_mm:
                     # Saw obstacle, move to reverse
                     self.set_state("evade_reverse")
