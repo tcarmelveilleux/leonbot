@@ -64,6 +64,9 @@ class VL6180XSuperBasicDriver(object):
     def start_ranging(self, meas_period_ms=100, continuous=False):
         self.set_register(self.SYSRANGE__INTERMEASUREMENT_PERIOD, (meas_period_ms/10))
         mode = ((1 if continuous else 0) * 2) | 1
+        self.set_register(self.SYSRANGE__START, 0)
+        time.sleep(0.1)
+        self.set_register(self.SYSTEM__INTERRUPT_CLEAR, 0xFF)
         self.set_register(self.SYSRANGE__START, mode)
 
     def read_range_mm(self):
@@ -127,7 +130,7 @@ class ControlThread(object):
 
             if "quit" in event:
                 running = False
-                for motor in self.motors:
+                for key, motor in self.motors.items():
                     motor["motor"].run(Adafruit_MotorHAT.RELEASE)
                     motor["motor"].setSpeed(0)
 
