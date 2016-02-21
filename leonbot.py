@@ -14,6 +14,9 @@ import pygame
 import time
 import smbus
 from Adafruit_MotorHAT import Adafruit_MotorHAT, Adafruit_DCMotor
+from Adafruit_PWM_Servo_Driver import PWM
+
+SERVO_HAT_I2C_ADDR = 0x41
 
 #MODE = "joystick"
 MODE = "autonomous"
@@ -224,6 +227,8 @@ class AutonomousModeController(object):
         self.vl6180 = VL6180XSuperBasicDriver()
         self.vl6180.start_ranging(100, True)
 
+        self.servo_controller = PWM(SERVO_HAT_I2C_ADDR)
+
         self.motor_controller = motor_controller
 
         self.obstacle_thresh_mm = params.get("obstacle_thresh_mm", 150.0)
@@ -233,6 +238,18 @@ class AutonomousModeController(object):
         self.rotation_duration_sec = params.get("rotation_duration_sec", 2.0)
         self.reverse_duration_sec = params.get("reverse_duration_sec", 1.0)
         self.start_time = time.time()
+        self.servo_start_time = time.time()
+
+
+        self.servo_pwm_freq_hz = params.get("servo_pwm_freq_hz", 30)
+        self.servo_max_angle_deg = params.get("servo_max_angle_deg", 45.0)
+        self.servo_max_angle_us = params.get("servo_max_angle_us", 400)
+        self.servo_neutral_us = params.get("servo_neutral_us", 1520)
+        self.servo_controller.setPWMFreq(self.servo_pwm_freq_hz)
+
+        self.servo_pos_idx = 0
+        self.servo_pos_deg = [-10.0, 0.0, 10.0]
+        self.servo_interval_sec = 0.5
 
         self.state = "judge_obstacle"
         self.thread = Thread(target=self.process, name="AutonomousModeController")
@@ -242,8 +259,33 @@ class AutonomousModeController(object):
         print "%s->%s" % (self.state, new_state)
         self.state = new_state
 
+    def set_servo_pulse(self, channel, angle_deg):
+        pulse_len_us = float(1e6) # 1,000,000 us per second at 1Hz
+        pulse_len_us /= float(self.servo_pwm_freq_hz) # us per pulse
+        duration_us = self.servo_neutral_us + ((angle_deg / self.servo_max_angle_deg) * self.servo_max_angle_us)
+        duration_counts = (duration_us / servo_pulse_len_us) * 4095
+        self.servo_controller.setPWM(channel, 0, int(duration_counts))
+
+    def _handle_servo(self):
+        # Early return if not ready to change servo position.
+        if (time.time() - self.servo_start_time) < self.servo_interval_sec:
+            return
+
+        # Get next servo position
+        self.servo_pos_idx += 1
+        if self.servo_pos_idx >= len(self.servo_pos_deg):
+            self.servo_pos_idx = 0
+
+        servo_pos_deg = self.servo_pos_deg[self.servo_pos_idx]
+        self.set_servo_pulse(0, servo_pos_deg)
+
+        self.servo_start_time = time.time()
+
     def process(self):
         while self.running:
+            # Update scanning servo position
+            self._handle_servo()
+
             if self.state == "judge_obstacle":
                 range_mm = self.vl6180.read_range_mm()
                 print "judge_obstacle, range=%d" % range_mm
