@@ -76,7 +76,7 @@ class VL6180XSuperBasicDriver(object):
         return self.get_register(self.RESULT__RANGE_VAL)
 
 class ControlThread(object):
-    def __init__(self, main_motor_hat):
+    def __init__(self, main_motor_hat, params=None):
         # Motor hat for locomotion
         self.main_motor_hat = main_motor_hat
         self.motors = {}
@@ -84,6 +84,20 @@ class ControlThread(object):
         self.motors["f_left"] = {"motor" : self.main_motor_hat.getMotor(2), "target" : 0.0, "scaler" : -1.0}
         self.motors["b_right"] = {"motor" : self.main_motor_hat.getMotor(3), "target" : 0.0, "scaler" : -1.0}
         self.motors["f_right"] = {"motor" : self.main_motor_hat.getMotor(4), "target" : 0.0, "scaler" : 1.0}
+
+        self.params = params if params is not None else []
+
+        self.servo_controller = PWM(SERVO_HAT_I2C_ADDR)
+
+        self.servo_pwm_freq_hz = params.get("servo_pwm_freq_hz", 48)
+        self.servo_max_angle_deg = params.get("servo_max_angle_deg", 45.0)
+        self.servo_max_angle_us = params.get("servo_max_angle_us", 400)
+        self.servo_neutral_us = params.get("servo_neutral_us", 1520)
+        # Correction factor to apply to each duration to match the
+        # internal oscillator of the PCA9685 on the Servo HAT. The internal
+        # RC clock is supposed to be 25MHz, but it can be off
+        self.servo_clock_k = params.get("servo_clock_k", 1.073446)
+        self.servo_controller.setPWMFreq(self.servo_pwm_freq_hz)
 
         # Queue for input events
         self.input_queue = Queue.Queue(1)
@@ -124,7 +138,15 @@ class ControlThread(object):
                 motor["motor"].setSpeed(0)
                 
         motor["target"] = true_target
-        
+
+    def set_servo_pulse(self, channel, angle_deg):
+        pulse_len_us = float(1e6) # 1,000,000 us per second at 1Hz
+        pulse_len_us /= float(self.servo_pwm_freq_hz) # us per pulse
+        duration_us = self.servo_clock_k * (self.servo_neutral_us + ((float(angle_deg) / float(self.servo_max_angle_deg)) * float(self.servo_max_angle_us)))
+        duration_counts = (duration_us / pulse_len_us) * 4095
+        #print "pulse_len_us: %.3f, duration_us=%.3f" % (pulse_len_us, duration_us)
+        self.servo_controller.setPWM(channel, 0, int(duration_counts))
+
     def process(self):
         running = True
         
@@ -143,6 +165,14 @@ class ControlThread(object):
                 
                 self.set_motor(self.motors["f_right"], event["right_y"])
                 self.set_motor(self.motors["b_right"], event["right_y"])
+            elif "servo_chan" in event:
+                servo_chan = event["servo_chan"]
+                angle_deg = event["angle_deg"]
+                if angle_deg > self.servo_max_angle_deg:
+                    angle_deg = self.servo_max_angle_deg
+                elif angle_deg < -self.servo_max_angle_deg:
+                    angle_deg = -self.servo_max_angle_deg
+                self.set_servo_pulse(servo_chan, angle_deg)
     
     def start(self):
         self.thread.start()
@@ -163,10 +193,17 @@ class InputThread(object):
         #self.right_y_axis_idx = 2
         self.right_y_axis_idx = 3
         self.quit_button_idx = 8
+        self.range_servo_axis = 4
+        self.elev_servo_axis = 5
         self.left_y_axis_multiplier = -1.0
         self.right_y_axis_multiplier = -1.0
+        self.elev_servo_angle = 0.0
+        self.range_servo_angle = 0.0
+        self.current_range_axis = 0.0
+        self.current_elev_axis = 0.0
+        self.current_left_y = 0.0
+        self.current_right_y = 0.0
 
-        
     def process(self):
         axes = [ 0.0 ] * self.joystick.get_numaxes()
         buttons = [ False ] * self.joystick.get_numbuttons()
@@ -200,20 +237,38 @@ class InputThread(object):
                 self.dispatch(axes, buttons)
                 last_time = time.time()
                 print buttons
-                
+
+    def send_dispath_update(self, dispatch_update):
+        print dispatch_update
+        for listener in self.listeners:
+            listener.put(dispatch_update)
                 
     def dispatch(self, axes, buttons):
         if axes is not None:
             left_y = axes[self.left_y_axis_idx] * self.left_y_axis_multiplier
             right_y = axes[self.right_y_axis_idx] * self.right_y_axis_multiplier
-            dispatch_update = {"left_y": left_y, "right_y": right_y}
+
+            range_axis = axes[self.range_servo_axis]
+            elev_axis = axes[self.elev_servo_axis]
+
+            if left_y != self.current_left_y or right_y != self.current_right_y:
+                self.current_left_y = left_y
+                self.current_right_y = right_y
+
+                dispatch_update = {"left_y": left_y, "right_y": right_y}
+            elif range_axis != self.current_range_axis or self.elev_servo_axis != self.current_elev_axis:
+                if range_axis != 0:
+                    self.range_servo_angle += 5.0 if range_axis > 0 else -5.0
+                    dispatch_update = {"servo_chan": 0, "angle_deg": self.range_servo_angle}
+                    self.send_dispath_update(dispatch_update)
+
+                if elev_axis != 0:
+                    self.elev_servo_angle += 5.0 if elev_axis > 0 else -5.0
+                    dispatch_update = {"servo_chan": 1, "angle_deg": self.elev_servo_angle}
+                    self.send_dispath_update(dispatch_update)
         else:
             dispatch_update = {"quit": True}
-        
-        print dispatch_update
-        for listener in self.listeners:
-            listener.put(dispatch_update)
-                
+
     def add_listener(self, listener):
         self.listeners.append(listener)
         
@@ -263,14 +318,6 @@ class AutonomousModeController(object):
         print "%s->%s" % (self.state, new_state)
         self.state = new_state
 
-    def set_servo_pulse(self, channel, angle_deg):
-        pulse_len_us = float(1e6) # 1,000,000 us per second at 1Hz
-        pulse_len_us /= float(self.servo_pwm_freq_hz) # us per pulse
-        duration_us = self.servo_clock_k * (self.servo_neutral_us + ((float(angle_deg) / float(self.servo_max_angle_deg)) * float(self.servo_max_angle_us)))
-        duration_counts = (duration_us / pulse_len_us) * 4095
-        #print "pulse_len_us: %.3f, duration_us=%.3f" % (pulse_len_us, duration_us)
-        self.servo_controller.setPWM(channel, 0, int(duration_counts))
-
     def _handle_servo(self):
         # Early return if not ready to change servo position.
         if (time.time() - self.servo_start_time) < self.servo_interval_sec:
@@ -282,7 +329,8 @@ class AutonomousModeController(object):
             self.servo_pos_idx = 0
 
         servo_pos_deg = self.servo_pos_deg[self.servo_pos_idx]
-        self.set_servo_pulse(0, servo_pos_deg)
+        dispatch_update = {"servo_chan": 0, "angle_deg": servo_pos_deg}
+        self.motor_controller.put(dispatch_update, block=True)
 
         self.servo_start_time = time.time()
 
