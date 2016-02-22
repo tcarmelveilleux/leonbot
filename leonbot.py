@@ -19,7 +19,7 @@ from Adafruit_PWM_Servo_Driver import PWM
 SERVO_HAT_I2C_ADDR = 0x41
 
 #MODE = "joystick"
-MODE = "autonomous"
+#MODE = "autonomous"
 
 class VL6180XSuperBasicDriver(object):
     SYSRANGE__START = 0x18
@@ -85,18 +85,18 @@ class ControlThread(object):
         self.motors["b_right"] = {"motor" : self.main_motor_hat.getMotor(3), "target" : 0.0, "scaler" : -1.0}
         self.motors["f_right"] = {"motor" : self.main_motor_hat.getMotor(4), "target" : 0.0, "scaler" : 1.0}
 
-        self.params = params if params is not None else []
+        self.params = params if params is not None else {}
 
         self.servo_controller = PWM(SERVO_HAT_I2C_ADDR)
 
-        self.servo_pwm_freq_hz = params.get("servo_pwm_freq_hz", 48)
-        self.servo_max_angle_deg = params.get("servo_max_angle_deg", 45.0)
-        self.servo_max_angle_us = params.get("servo_max_angle_us", 400)
-        self.servo_neutral_us = params.get("servo_neutral_us", 1520)
+        self.servo_pwm_freq_hz = self.params.get("servo_pwm_freq_hz", 48)
+        self.servo_max_angle_deg = self.params.get("servo_max_angle_deg", 45.0)
+        self.servo_max_angle_us = self.params.get("servo_max_angle_us", 400)
+        self.servo_neutral_us = self.params.get("servo_neutral_us", 1520)
         # Correction factor to apply to each duration to match the
         # internal oscillator of the PCA9685 on the Servo HAT. The internal
         # RC clock is supposed to be 25MHz, but it can be off
-        self.servo_clock_k = params.get("servo_clock_k", 1.073446)
+        self.servo_clock_k = self.params.get("servo_clock_k", 1.073446)
         self.servo_controller.setPWMFreq(self.servo_pwm_freq_hz)
 
         # Queue for input events
@@ -193,8 +193,10 @@ class InputThread(object):
         #self.right_y_axis_idx = 2
         self.right_y_axis_idx = 3
         self.quit_button_idx = 8
-        self.range_servo_axis = 4
-        self.elev_servo_axis = 5
+        self.range_less_button_idx = 0
+        self.elev_less_button_idx = 1
+        self.range_more_button_idx = 2
+        self.elev_more_button_idx = 3
         self.left_y_axis_multiplier = -1.0
         self.right_y_axis_multiplier = -1.0
         self.elev_servo_angle = 0.0
@@ -236,7 +238,6 @@ class InputThread(object):
                 old_buttons = buttons[:]
                 self.dispatch(axes, buttons)
                 last_time = time.time()
-                print buttons
 
     def send_dispath_update(self, dispatch_update):
         print dispatch_update
@@ -248,15 +249,27 @@ class InputThread(object):
             left_y = axes[self.left_y_axis_idx] * self.left_y_axis_multiplier
             right_y = axes[self.right_y_axis_idx] * self.right_y_axis_multiplier
 
-            range_axis = axes[self.range_servo_axis]
-            elev_axis = axes[self.elev_servo_axis]
+            if buttons[self.range_less_button_idx]:
+                range_axis = 1
+            elif buttons[self.range_more_button_idx]:
+                range_axis = -1
+            else:
+                range_axis = 0
+
+            if buttons[self.elev_less_button_idx]:
+                elev_axis = 1
+            elif buttons[self.elev_more_button_idx]:
+                elev_axis = -1
+            else:
+                elev_axis = 0
 
             if left_y != self.current_left_y or right_y != self.current_right_y:
                 self.current_left_y = left_y
                 self.current_right_y = right_y
 
                 dispatch_update = {"left_y": left_y, "right_y": right_y}
-            elif range_axis != self.current_range_axis or self.elev_servo_axis != self.current_elev_axis:
+                self.send_dispath_update(dispatch_update)
+            elif range_axis != self.current_range_axis or elev_axis != self.current_elev_axis:
                 if range_axis != 0:
                     self.range_servo_angle += 5.0 if range_axis > 0 else -5.0
                     dispatch_update = {"servo_chan": 0, "angle_deg": self.range_servo_angle}
@@ -268,6 +281,8 @@ class InputThread(object):
                     self.send_dispath_update(dispatch_update)
         else:
             dispatch_update = {"quit": True}
+            self.send_dispath_update(dispatch_update)
+
 
     def add_listener(self, listener):
         self.listeners.append(listener)
@@ -294,16 +309,6 @@ class AutonomousModeController(object):
         self.reverse_duration_sec = params.get("reverse_duration_sec", 1.0)
         self.start_time = time.time()
         self.servo_start_time = time.time()
-
-        self.servo_pwm_freq_hz = params.get("servo_pwm_freq_hz", 48)
-        self.servo_max_angle_deg = params.get("servo_max_angle_deg", 45.0)
-        self.servo_max_angle_us = params.get("servo_max_angle_us", 400)
-        self.servo_neutral_us = params.get("servo_neutral_us", 1520)
-        # Correction factor to apply to each duration to match the 
-        # internal oscillator of the PCA9685 on the Servo HAT. The internal
-        # RC clock is supposed to be 25MHz, but it can be off
-        self.servo_clock_k = params.get("servo_clock_k", 1.073446)
-        self.servo_controller.setPWMFreq(self.servo_pwm_freq_hz)
 
         self.servo_pos_idx = 0
         self.servo_pos_deg = [-10.0, 0.0, 10.0, 0.0]
@@ -399,6 +404,12 @@ def main():
     mh = Adafruit_MotorHAT(addr=0x62)
     # recommended for auto-disabling motors on shutdown!
     atexit.register(turnOffMotors)
+
+    # Get mode from command line
+    if len(sys.argv) >= 2 and sys.argv[1].lower() == "joystick":
+       MODE = "joystick"
+    else:
+       MODE = "autonomous"
 
     if MODE == "joystick":
         pygame.init()
